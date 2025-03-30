@@ -36,6 +36,11 @@ impl Store {
         Self { storage }
     }
 
+    /// Returns a clone of the underlying database.
+    pub fn db(&self) -> Arc<dyn Database> {
+        self.storage.clone()
+    }
+
     /// Fetches value from given column.
     ///
     /// If the key does not exist in the column returns `None`.  Otherwise

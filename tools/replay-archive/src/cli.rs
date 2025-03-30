@@ -51,19 +51,33 @@ pub struct ReplayArchiveCommand {
 }
 
 impl ReplayArchiveCommand {
+    /// Ensures that all blocks in [start_height..=end_height] exist.
+    /// If any block is missing, it bails with an error.
+    fn check_blocks_range_present(
+        chain_store: &ChainStore,
+        start_height: BlockHeight,
+        end_height: BlockHeight,
+    ) -> Result<()> {
+        for h in start_height..=end_height {
+            chain_store.get_block_hash_by_height(h)
+                .with_context(|| format!("Missing block at height {h}"))?;
+        }
+        Ok(())
+    }
+
     pub fn run(self, home_dir: &Path, genesis_validation: GenesisValidationMode) -> Result<()> {
         let near_config = load_config(home_dir, genesis_validation)
             .unwrap_or_else(|e| panic!("Error loading config: {:#}", e));
 
-        if !near_config.config.archive {
-            bail!("This must be an archival node.".to_string());
-        }
-        if near_config.config.cold_store.is_none() {
-            bail!("Cold storage is not configured for the archival node.".to_string());
-        }
-
         let mut controller =
             ReplayController::new(home_dir, near_config, self.start_height, self.end_height)?;
+
+        // Make sure all blocks in [start..end] are in the DB:
+        Self::check_blocks_range_present(
+            &controller.chain_store,
+            controller.start_height,
+            controller.end_height
+        )?;
 
         // Replay all the blocks until we reach the end block height.
         while controller.replay_next_block()? {}

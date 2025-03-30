@@ -3,7 +3,7 @@ use std::io;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
-use anyhow::{Context, anyhow};
+use anyhow::Context;
 use itertools::Itertools;
 use near_store::db::{
     DBIterator, DBSlice, DBTransaction, Database, SplitDB, StoreStatistics, TestDB,
@@ -14,9 +14,9 @@ use nearcore::NearConfig;
 /// Database layer for replaying the chain using the archival storage for reads and a temporary storage for writes.
 /// For archival data we use split db ad the read source and for temporary storage we use an in-memory DB.
 pub struct ReplayDB {
-    /// SplitDB used to read archival data that is previously recorded.
-    /// Opened in read-only mode.
-    split_db: Arc<SplitDB>,
+    /// Read-only source of historical data. Could be SplitDB or just the hot DB.
+    archival_db: Arc<dyn Database>,
+
     /// TestDB used to store data generated during the replay.
     /// Opened in read/write mode.
     write_db: Arc<TestDB>,
@@ -33,9 +33,9 @@ pub struct ReplayDB {
 }
 
 impl ReplayDB {
-    pub fn new(split_db: Arc<SplitDB>, archival_columns: HashSet<DBCol>) -> Arc<Self> {
+    pub fn new(archival_db: Arc<dyn Database>, archival_columns: HashSet<DBCol>) -> Arc<Self> {
         Arc::new(Self {
-            split_db,
+            archival_db,
             write_db: TestDB::new(),
             archival_columns,
             columns_read: Default::default(),
@@ -43,10 +43,15 @@ impl ReplayDB {
         })
     }
 
+    /// Helper if you specifically have a `SplitDB`.
+    pub fn new_for_split_db(split_db: Arc<SplitDB>, archival_columns: HashSet<DBCol>) -> Arc<Self> {
+        Self::new(split_db as Arc<dyn Database>, archival_columns)
+    }
+
     /// Returns the database to read from based on whether the column is archival or not.
     fn read_db(&self, col: DBCol) -> &dyn Database {
         if self.archival_columns.contains(&col) {
-            self.split_db.as_ref()
+            self.archival_db.as_ref()
         } else {
             self.write_db.as_ref()
         }
@@ -150,9 +155,11 @@ pub(crate) fn open_storage_for_replay(
         &near_config.config.store,
         near_config.config.archival_config(),
     );
-    let split_storage = opener.open_in_mode(Mode::ReadOnly).context("Failed to open storage")?;
-    match split_storage.get_split_db() {
-        Some(split_db) => Ok(ReplayDB::new(split_db, archival_columns)),
-        None => Err(anyhow!("Failed to get split store for archival node")),
+    let node_storage = opener.open_in_mode(Mode::ReadOnly).context("Failed to open storage")?;
+    if let Some(split_db) = node_storage.get_split_db() {
+        Ok(ReplayDB::new_for_split_db(split_db, archival_columns))
+    } else {
+        let hot_store = node_storage.get_hot_store();
+        Ok(ReplayDB::new(hot_store.db(), archival_columns))
     }
 }
